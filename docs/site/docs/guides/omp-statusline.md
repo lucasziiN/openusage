@@ -52,4 +52,4 @@ The extension invokes `openusage omp-statusline` directly (not through a shell),
 
 OpenUsage selects the valid quota window with the **lowest remaining fraction** across the reports returned by OMP. The status shows that report's provider, window label, rounded percent **remaining**, and a relative reset countdown from OMP's `resetsAt` timestamp. A reset already due is shown as `now`; missing reset times are shown as `unknown`.
 
-This is quota availability, not usage cost: `35% left` means 35 percent of that provider window remains. The command reads only report provider/window/amount fields from OMP's redacted JSON and never displays account identifiers or other report metadata. If OMP has no valid quota fraction, the footer reports that quota data is unavailable.
+This is quota availability, not usage cost: `35% left` means 35 percent of that provider window remains. The OMP JSON response can contain account identifiers even with `--redact`; the command parses only provider, window, and amount fields and never displays account metadata. If OMP has no valid quota fraction, the footer reports that quota data is unavailable.
