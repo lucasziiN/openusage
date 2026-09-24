@@ -38,17 +38,14 @@ func TestProvider_Fetch_MissingDir(t *testing.T) {
 	p.clock = fixedClock{t: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)}
 	acct := core.AccountConfig{ID: "pi", Provider: "pi", Auth: "local"}
 	acct.SetPath("sessions_dir", filepath.Join(t.TempDir(), "missing"))
+	acct.SetPath("omp_sessions_dir", filepath.Join(t.TempDir(), "missing-omp"))
 
-	// resolveSessionsDirs will fall back to defaults; on most test machines
-	// neither default exists, so we'll get Unknown. We tolerate either
-	// Unknown (no defaults) or OK (defaults exist) but require no metrics
-	// in the Unknown case.
 	snap, err := p.Fetch(context.Background(), acct)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if snap.Status == core.StatusUnknown && len(snap.Metrics) != 0 {
-		t.Errorf("Unknown status but metrics non-empty: %v", snap.Metrics)
+	if snap.Status != core.StatusUnknown || len(snap.Metrics) != 0 {
+		t.Errorf("missing sessions should have unknown status and no metrics: status=%v metrics=%v", snap.Status, snap.Metrics)
 	}
 }
 
@@ -84,6 +81,7 @@ malformed-line
 	p.clock = fixedClock{t: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)}
 	acct := core.AccountConfig{ID: "pi", Provider: "pi", Auth: "local"}
 	acct.SetPath("sessions_dir", root)
+	acct.SetPath("omp_sessions_dir", filepath.Join(root, "missing-omp"))
 
 	snap, err := p.Fetch(context.Background(), acct)
 	if err != nil {

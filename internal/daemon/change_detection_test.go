@@ -93,9 +93,10 @@ func TestChangeDetectorReturnsFalse_WhenNoFiles(t *testing.T) {
 			ID:       "test",
 			Provider: provider.ID(),
 			RuntimeHints: map[string]string{
-				"claude_dir":   "/nonexistent/path",
-				"config_dir":   "/nonexistent/path",
-				"sessions_dir": "/nonexistent/path",
+				"claude_dir":       "/nonexistent/path",
+				"config_dir":       "/nonexistent/path",
+				"sessions_dir":     "/nonexistent/path",
+				"omp_sessions_dir": "/nonexistent/path",
 			},
 			ProviderPaths: map[string]string{
 				"tracking_db": "/nonexistent/path/tracking.db",

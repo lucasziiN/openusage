@@ -141,6 +141,7 @@ const sidebars: SidebarsConfig = {
         'guides/cli-reports',
         'guides/tmux-integration',
         'guides/claude-code-statusline',
+        'guides/omp-statusline',
         'guides/headless-servers',
         'guides/multi-machine',
       ],

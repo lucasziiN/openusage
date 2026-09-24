@@ -137,6 +137,13 @@ Restart Claude Code and it's there.
 
 See the [statusline guide](docs/site/docs/guides/claude-code-statusline.md) for customization and manual setup.
 
+### OMP quota statusline
+
+An [Oh My Pi extension](docs/site/docs/guides/omp-statusline.md) adds the most constrained
+provider quota and its reset countdown to OMP's footer without replacing its
+existing token, context, or session-cost segments. It reads `omp usage --json --redact`;
+the OpenUsage telemetry daemon is not required, including on Windows.
+
 ## Track coding agent usage across multiple platforms
 
 Native dashboards show one provider at a time. OpenUsage gives you one local-first view across coding agents, API platforms, and local runtimes so you can answer:

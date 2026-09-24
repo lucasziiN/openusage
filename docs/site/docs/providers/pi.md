@@ -49,21 +49,28 @@ Both directories are walked when present and entries are de-duped by canonical (
 }
 ```
 
-Setting `sessions_dir` replaces the default search with a single directory. Use this only when Pi writes sessions to a non-default location. There is no separate override for the Oh My Pi directory; point `sessions_dir` at whichever single tree you want walked.
+`extra.sessions_dir` overrides the Pi sessions root; `extra.omp_sessions_dir` overrides the Oh My Pi root. These overrides are independent: setting only `sessions_dir` still scans the default `~/.omp/agent/sessions/` directory when it exists, and vice versa. Point the other hint at a directory that does not exist if you need to exclude that default root.
 
 ## Data sources & how each metric is computed
 
-The provider walks every `.jsonl` file under the resolved sessions directories and parses each as a Pi session transcript.
+The provider walks every `.jsonl` file under the resolved sessions directories and parses each as a Pi or Oh My Pi session transcript.
 
 ### Session file format
 
-Each transcript is a JSON-lines file. The first line must be a session header:
+Pi transcripts start with a session header:
 
 ```json
 {"type": "session", "id": "...", "timestamp": "...", "cwd": "..."}
 ```
 
-Files whose first line is not a `session` header are silently skipped. Subsequent lines are `message` records; only those with `role: "assistant"` and a `usage` block are counted. Per-line decode errors are dropped individually so partial corruption never poisons a whole session.
+Oh My Pi transcripts may place a version 1 title record immediately before the session header:
+
+```json
+{"type": "title", "v": 1, "title": "..."}
+{"type": "session", "id": "...", "timestamp": "...", "cwd": "..."}
+```
+
+Only this single versioned title record is accepted before an Oh My Pi session header. Files with a missing, malformed, or unexpected prefix are skipped rather than searched for a later header. After the header, only `message` records with `role: "assistant"` and a `usage` block are counted. Per-line decode errors are dropped individually so partial corruption never poisons a whole session.
 
 ### Field mapping
 
@@ -106,8 +113,8 @@ Timestamps are parsed as RFC 3339. When a turn carries no timestamp the file's m
 ## Troubleshooting
 
 - **Tile is empty** — run Pi (or Oh My Pi) at least once so that a JSONL session file lands under `~/.pi/agent/sessions/` or `~/.omp/agent/sessions/`. Confirm with `openusage detect`.
-- **Sessions present on disk but not on the tile** — open the first line of one of the transcripts and confirm it is a `{"type":"session",...}` header. Pi versions that omit the header are skipped.
-- **Wrong directory walked** — set `extra.sessions_dir` in your account config to the exact directory containing session subfolders.
+- **Sessions present on disk but not on the tile** — check that a Pi transcript starts with a `{"type":"session",...}` header, or that an Oh My Pi transcript starts with one `{"type":"title","v":1,...}` record followed immediately by a session header.
+- **Wrong directory walked** — set `extra.sessions_dir` for the Pi root or `extra.omp_sessions_dir` for the Oh My Pi root in your account config.
 
 ## Related
 
