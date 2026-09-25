@@ -137,6 +137,16 @@ Restart Claude Code and it's there.
 
 See the [statusline guide](docs/site/docs/guides/claude-code-statusline.md) for customization and manual setup.
 
+### OMP ChatGPT and Claude statusline
+
+The [Oh My Pi extension](docs/site/docs/guides/omp-statusline.md) reuses the
+Claude Code cost formatter—same emojis, cost group and burn rate—with ChatGPT
+and Claude quotas on separate rows and per-model session costs beneath each.
+Select segments with `openusage omp-statusline install`, then load the extension.
+OMP's native model/context row appears above OpenUsage with its contents unchanged.
+This order requires the documented local OMP layout patch (rebuild it with
+`integrations/omp/rebuild-omp-patched.sh` after `omp update`); no OpenUsage daemon is needed.
+
 ## Track coding agent usage across multiple platforms
 
 Native dashboards show one provider at a time. OpenUsage gives you one local-first view across coding agents, API platforms, and local runtimes so you can answer:

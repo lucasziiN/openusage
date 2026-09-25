@@ -44,6 +44,7 @@ type statuslineOptions struct {
 	contextMedium float64
 	contextHigh   float64
 	segments      []string // enabled segment keys; empty means all
+	onlyKnownCosts bool // OMP omits missing prices; Claude Code keeps its zero fallback
 }
 
 // statuslineSegmentDefs are the toggleable pieces of the status line, in render
@@ -527,6 +528,9 @@ type statuslineValues struct {
 	model        string
 	sessionCost  float64
 	todayCost    float64
+	sessionKnown bool
+	todayKnown   bool
+	todayLabel   string // empty keeps the Claude Code label
 	blockCost    float64
 	blockLeft    time.Duration
 	burn         float64
@@ -546,11 +550,15 @@ func assembleStatusline(v statuslineValues, opts statuslineOptions) string {
 		parts = append(parts, "🤖 "+v.model)
 	}
 	var costs []string
-	if opts.segmentEnabled("session") {
+	if opts.segmentEnabled("session") && (!opts.onlyKnownCosts || v.sessionKnown) {
 		costs = append(costs, fmt.Sprintf("$%.2f sess", v.sessionCost))
 	}
-	if opts.segmentEnabled("today") {
-		costs = append(costs, fmt.Sprintf("$%.2f today", v.todayCost))
+	if opts.segmentEnabled("today") && (!opts.onlyKnownCosts || v.todayKnown) {
+		label := v.todayLabel
+		if label == "" {
+			label = "today"
+		}
+		costs = append(costs, fmt.Sprintf("$%.2f %s", v.todayCost, label))
 	}
 	if opts.segmentEnabled("block") && v.haveBlock {
 		costs = append(costs, fmt.Sprintf("$%.2f block (%s left)", v.blockCost, fmtStatusDuration(v.blockLeft)))

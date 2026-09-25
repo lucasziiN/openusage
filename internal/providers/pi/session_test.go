@@ -63,6 +63,37 @@ this is not json at all, skip me
 	}
 }
 
+func TestReadPiSessionFile_OmpTitleBeforeSession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	body := `{"type":"title","v":1,"title":"project-x"}
+{"type":"session","id":"omp_ses_001","timestamp":"2026-02-01T00:00:00.000Z","cwd":"/home/jane/work/project-x"}
+{"type":"message","id":"msg_001","timestamp":"2026-02-01T00:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet","provider":"anthropic","usage":{"input":100,"output":40,"cacheRead":7,"cacheWrite":3}}}
+{"type":"message","id":"msg_002","timestamp":"2026-02-01T00:00:02.000Z","message":{"role":"user","model":"claude-sonnet","provider":"anthropic","usage":{"input":500,"output":600}}}
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	entries, meta, err := readPiSessionFile(path)
+	if err != nil {
+		t.Fatalf("readPiSessionFile: %v", err)
+	}
+	if meta.SessionID != "omp_ses_001" {
+		t.Fatalf("session id = %q, want omp_ses_001", meta.SessionID)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1 assistant entry", len(entries))
+	}
+	entry := entries[0]
+	if entry.SessionID != "omp_ses_001" || entry.Model != "claude-sonnet" || entry.Provider != "anthropic" {
+		t.Errorf("entry session/model/provider = %q/%q/%q", entry.SessionID, entry.Model, entry.Provider)
+	}
+	if entry.Input != 100 || entry.Output != 40 || entry.CacheRead != 7 || entry.CacheWrite != 3 {
+		t.Errorf("entry tokens = %+v", entry)
+	}
+}
+
 func TestReadPiSessionFile_InvalidHeader(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
@@ -95,6 +126,50 @@ func TestReadPiSessionFile_GarbageHeader(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("expected zero entries from garbage-header file, got %d", len(entries))
+	}
+}
+
+func TestReadPiSessionFile_RejectsInvalidOmpPrefixes(t *testing.T) {
+	title := `{"type":"title","v":1,"title":"project-x"}`
+	session := `{"type":"session","id":"omp_ses_001"}`
+	assistant := `{"type":"message","message":{"role":"assistant","model":"m","provider":"p","usage":{"input":1}}}`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "unversioned title",
+			body: `{"type":"title","title":"project-x"}` + "\n" + session + "\n" + assistant,
+		},
+		{
+			name: "multiple title records",
+			body: title + "\n" + title + "\n" + session + "\n" + assistant,
+		},
+		{
+			name: "title without session header",
+			body: title + "\n" + assistant,
+		},
+		{
+			name: "arbitrary record before session",
+			body: `{"type":"other"}` + "\n" + session + "\n" + assistant,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(test.body), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			entries, meta, err := readPiSessionFile(path)
+			if err != nil {
+				t.Fatalf("readPiSessionFile: %v", err)
+			}
+			if len(entries) != 0 || meta.SessionID != "" {
+				t.Errorf("invalid prefix was accepted: entries = %d, meta = %+v", len(entries), meta)
+			}
+		})
 	}
 }
 
@@ -134,6 +209,24 @@ func TestReadPiSessionFile_AllZeroTokensFiltered(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("expected zero entries for all-zero usage, got %d", len(entries))
+	}
+}
+
+func TestReadPiSessionFile_RecordedCostWithoutTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	body := `{"type":"session","id":"omp_ses_cost"}
+{"type":"message","message":{"role":"assistant","model":"m","usage":{"input":0,"output":0,"cost":{"total":0.25}}}}
+{"type":"message","message":{"role":"assistant","model":"m","usage":{"input":0,"cost":{"total":-1}}}}
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	entries, _, err := readPiSessionFile(path)
+	if err != nil {
+		t.Fatalf("readPiSessionFile: %v", err)
+	}
+	if len(entries) != 1 || !entries[0].HasCost || entries[0].CostUSD != 0.25 {
+		t.Fatalf("recorded cost-only turn = %+v, want one $0.25 turn", entries)
 	}
 }
 

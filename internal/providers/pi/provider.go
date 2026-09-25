@@ -1,7 +1,6 @@
-// Package pi implements a local-data provider that reads JSONL session
-// transcripts from per-workspace directories under the user's home and
-// aggregates per-model token totals. No network calls are made and no
-// authentication is required.
+// Package pi reads local Pi and OMP JSONL sessions, aggregating per-model
+// tokens and any cost recorded with assistant turns. No network calls or
+// authentication are required.
 package pi
 
 import (
@@ -177,6 +176,7 @@ func populateSnapshot(snap *core.UsageSnapshot, entries []piModelEntry, now time
 		totalOutput     int64
 		totalCacheRead  int64
 		totalCacheWrite int64
+		totalCostUSD    float64
 	)
 
 	today := now.UTC().Format("2006-01-02")
@@ -185,6 +185,7 @@ func populateSnapshot(snap *core.UsageSnapshot, entries []piModelEntry, now time
 	tokensByDay := make(map[string]float64)
 	sessionsByDay := make(map[string]float64)
 	sessionsSeenPerDay := make(map[string]map[string]struct{})
+	var costByDay map[string]float64
 
 	for _, e := range entries {
 		bucket, ok := perModel[e.Model]
@@ -208,6 +209,9 @@ func populateSnapshot(snap *core.UsageSnapshot, entries []piModelEntry, now time
 		totalOutput += e.Output
 		totalCacheRead += e.CacheRead
 		totalCacheWrite += e.CacheWrite
+		if e.HasCost {
+			totalCostUSD += e.CostUSD
+		}
 
 		if e.SessionID != "" {
 			sessions[e.SessionID] = struct{}{}
@@ -215,6 +219,12 @@ func populateSnapshot(snap *core.UsageSnapshot, entries []piModelEntry, now time
 
 		if !e.Timestamp.IsZero() {
 			day := e.Timestamp.UTC().Format("2006-01-02")
+			if e.CostUSD > 0 {
+				if costByDay == nil {
+					costByDay = make(map[string]float64)
+				}
+				costByDay[day] += e.CostUSD
+			}
 			tokensByDay[day] += float64(e.Input + e.Output)
 			seen, ok := sessionsSeenPerDay[day]
 			if !ok {
@@ -246,12 +256,16 @@ func populateSnapshot(snap *core.UsageSnapshot, entries []piModelEntry, now time
 	setUsedMetric(snap, "total_output_tokens", float64(totalOutput), "tokens", allTimeWindow)
 	setUsedMetric(snap, "total_cache_read", float64(totalCacheRead), "tokens", allTimeWindow)
 	setUsedMetric(snap, "total_cache_write", float64(totalCacheWrite), "tokens", allTimeWindow)
+	setUsedMetric(snap, "total_cost_usd", totalCostUSD, "USD", allTimeWindow)
 
 	if len(sessionsByDay) > 0 {
 		snap.DailySeries["sessions"] = core.SortedTimePoints(sessionsByDay)
 	}
 	if len(tokensByDay) > 0 {
 		snap.DailySeries["tokens"] = core.SortedTimePoints(tokensByDay)
+	}
+	if len(costByDay) > 0 {
+		snap.DailySeries["cost_usd"] = core.SortedTimePoints(costByDay)
 	}
 
 	for model, bucket := range perModel {

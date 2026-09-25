@@ -19,6 +19,11 @@ type piSessionHeader struct {
 	CWD       string `json:"cwd,omitempty"`
 }
 
+type piOmpTitleRecord struct {
+	Type    string `json:"type"`
+	Version int    `json:"v"`
+}
+
 type piMessageLine struct {
 	Type      string         `json:"type"`
 	ID        string         `json:"id,omitempty"`
@@ -34,10 +39,15 @@ type piMessageBody struct {
 }
 
 type piUsage struct {
-	Input      *int64 `json:"input,omitempty"`
-	Output     *int64 `json:"output,omitempty"`
-	CacheRead  *int64 `json:"cacheRead,omitempty"`
-	CacheWrite *int64 `json:"cacheWrite,omitempty"`
+	Input      *int64       `json:"input,omitempty"`
+	Output     *int64       `json:"output,omitempty"`
+	CacheRead  *int64       `json:"cacheRead,omitempty"`
+	CacheWrite *int64       `json:"cacheWrite,omitempty"`
+	Cost       *piUsageCost `json:"cost,omitempty"`
+}
+
+type piUsageCost struct {
+	Total *float64 `json:"total,omitempty"`
 }
 
 type piSessionMeta struct {
@@ -56,12 +66,15 @@ type piModelEntry struct {
 	Output         int64
 	CacheRead      int64
 	CacheWrite     int64
+	CostUSD        float64
+	HasCost        bool
 	Timestamp      time.Time
 }
 
-// readPiSessionFile parses one JSONL session file. The first line must be a
-// session header; otherwise the file is skipped. Malformed message lines are
-// dropped individually so partial corruption never poisons a whole session.
+// readPiSessionFile parses one JSONL session file. Pi files start with a session
+// header; OMP files may start with one versioned title record followed by the
+// header. Any other prefix is skipped. Malformed message lines are dropped
+// individually so partial corruption never poisons a whole session.
 func readPiSessionFile(path string) ([]piModelEntry, piSessionMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -78,9 +91,22 @@ func readPiSessionFile(path string) ([]piModelEntry, piSessionMeta, error) {
 	if !scanner.Scan() {
 		return nil, piSessionMeta{}, nil
 	}
+
 	var header piSessionHeader
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil || header.Type != "session" {
-		return nil, piSessionMeta{}, nil
+		var title piOmpTitleRecord
+		if err := json.Unmarshal(scanner.Bytes(), &title); err != nil ||
+			title.Type != "title" ||
+			title.Version != 1 {
+			return nil, piSessionMeta{}, nil
+		}
+		if !scanner.Scan() {
+			return nil, piSessionMeta{}, nil
+		}
+		header = piSessionHeader{}
+		if err := json.Unmarshal(scanner.Bytes(), &header); err != nil || header.Type != "session" {
+			return nil, piSessionMeta{}, nil
+		}
 	}
 
 	meta := piSessionMeta{
@@ -126,7 +152,12 @@ func readPiSessionFile(path string) ([]piModelEntry, piSessionMeta, error) {
 			CacheRead:      nonNegative(line.Message.Usage.CacheRead),
 			CacheWrite:     nonNegative(line.Message.Usage.CacheWrite),
 		}
-		if entry.Input == 0 && entry.Output == 0 && entry.CacheRead == 0 && entry.CacheWrite == 0 {
+		if cost := line.Message.Usage.Cost; cost != nil && cost.Total != nil && *cost.Total >= 0 {
+			entry.CostUSD = *cost.Total
+			entry.HasCost = true
+		}
+		if entry.Input == 0 && entry.Output == 0 && entry.CacheRead == 0 && entry.CacheWrite == 0 &&
+			(!entry.HasCost || entry.CostUSD == 0) {
 			continue
 		}
 
