@@ -1,9 +1,13 @@
 import { execFile } from "node:child_process";
+import { open, readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { type Component, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 
 type OmpExtensionContext = {
+  // False for headless sessions (task/eval subagents, print mode), whose UI is a no-op.
+  hasUI: boolean;
   ui: {
     readonly theme: Theme;
     // Only present on OMP builds carrying the below-footer patch; stock
@@ -19,17 +23,22 @@ type OmpExtensionContext = {
   models: { list(): Array<{ name: string; id: string; provider: string }> };
   sessionManager: {
     getSessionId(): string;
-    getEntries(): Array<{
-      type: string;
-      message?: {
-        role: string;
-        model?: string;
-        provider?: string;
-        usage?: { cost?: { total?: number }; input?: number; output?: number };
-      };
-    }>;
+    // Subagent transcripts (`<id>.jsonl`, nested under `<parent>/`) live here.
+    getArtifactsDir(): string | null;
+    getEntries(): SessionEntry[];
   };
   setInterval(callback: () => void, delayMs: number): unknown;
+};
+
+type SessionEntry = {
+  type: string;
+  id?: string;
+  message?: {
+    role: string;
+    model?: string;
+    provider?: string;
+    usage?: { cost?: { total?: number }; input?: number; output?: number };
+  };
 };
 
 type WidgetPlacement = "belowFooter" | "belowEditor";
@@ -39,6 +48,8 @@ type OmpExtensionAPI = {
     event: "session_start" | "session_switch" | "session_shutdown" | "message_end",
     listener: (_event: unknown, context: OmpExtensionContext) => void,
   ): void;
+  // Session event bus; task/eval subagent frames arrive on `task:subagent:*`.
+  events: { on(channel: string, handler: (data: unknown) => void): () => void };
 };
 
 type QuotaSummary = {
@@ -66,11 +77,44 @@ type SessionModelCost = {
   costUSD?: number;
 };
 
+type ModelTotal = { provider: string; modelID: string; costUSD: number; priced: boolean };
+
+type TranscriptTurn = { key: string; provider: string; modelID: string; costUSD?: number };
+
+type TranscriptCursor = {
+  offset: number;
+  // Bytes after the last newline: a line still being appended.
+  pending: Buffer;
+  // Keyed by entry id so a rewritten transcript never counts a turn twice.
+  turns: Map<string, TranscriptTurn>;
+};
+
+type SubagentUsageTracker = {
+  // Resolves whether the subagent totals changed.
+  scan(): Promise<boolean>;
+  turns(): Iterable<TranscriptTurn>;
+};
+
 const STATUS_KEY = "openusage-quota";
 const REFRESH_INTERVAL_MS = 60_000;
 const COST_REFRESH_INTERVAL_MS = 5 * 60_000;
 const COMMAND_TIMEOUT_MS = 15_000;
 const COST_TIMEOUT_MS = 45_000;
+const SUBAGENT_SCAN_DEBOUNCE_MS = 500;
+// Progress is coalesced (~150 ms) and lifecycle covers start/finish/abort; the
+// raw `task:subagent:event` stream fires per token and would only add churn.
+const SUBAGENT_CHANNELS = ["task:subagent:progress", "task:subagent:lifecycle"];
+
+// Subagent sessions rebind this module's factory in-process, so module state is
+// shared: headless instances ping the UI instance whenever a subagent at any
+// depth finishes an assistant message.
+const subagentUsageListeners = new Set<() => void>();
+
+function signalSubagentUsage(): void {
+  for (const listener of subagentUsageListeners) {
+    listener();
+  }
+}
 
 function readQuotaSummary(): Promise<QuotaSummary | undefined> {
   const { promise, resolve } = Promise.withResolvers<QuotaSummary | undefined>();
@@ -182,47 +226,172 @@ function readDailyCost(provider: string, date: string): Promise<number | undefin
   return promise;
 }
 
-function sessionRecordedCosts(context: OmpExtensionContext): {
+// usage.cost.total is priced by OMP with the model that produced the turn, so a
+// subagent's turns carry its own model's price, never the parent's.
+function assistantTurn(entry: SessionEntry): TranscriptTurn | undefined {
+  const message = entry.message;
+  if (entry.type !== "message" || message?.role !== "assistant" || !message.usage) {
+    return undefined;
+  }
+  const provider = message.provider ?? "";
+  const modelID = message.model ?? "Unknown model";
+  const amount = message.usage.cost?.total;
+  return {
+    key: `${provider}/${modelID}`,
+    provider,
+    modelID,
+    costUSD: typeof amount === "number" && Number.isFinite(amount) && amount >= 0 ? amount : undefined,
+  };
+}
+
+function sessionRecordedCosts(context: OmpExtensionContext, subagentTurns: Iterable<TranscriptTurn>): {
   sessionCostUSD?: number;
   modelCosts: SessionModelCost[];
 } {
-  const models = new Map<string, { provider: string; model: string; costUSD: number; priced: boolean }>();
+  const models = new Map<string, ModelTotal>();
+  let turns = 0;
+  const add = (turn: TranscriptTurn): void => {
+    turns++;
+    let model = models.get(turn.key);
+    if (!model) {
+      model = { provider: turn.provider, modelID: turn.modelID, costUSD: 0, priced: true };
+      models.set(turn.key, model);
+    }
+    if (turn.costUSD === undefined) {
+      model.priced = false;
+    } else {
+      model.costUSD += turn.costUSD;
+    }
+  };
+  // Main turns first keeps the main agent's models leading the model row.
+  for (const entry of context.sessionManager.getEntries()) {
+    const turn = assistantTurn(entry);
+    if (turn) {
+      add(turn);
+    }
+  }
+  for (const turn of subagentTurns) {
+    add(turn);
+  }
+
   const names = new Map(context.models.list().map((model) => [
     `${model.provider}/${model.id}`, model.name,
   ]));
   let totalCostUSD = 0;
   let complete = true;
-  let turns = 0;
-  for (const entry of context.sessionManager.getEntries()) {
-    const message = entry.message;
-    if (entry.type !== "message" || message?.role !== "assistant" || !message.usage) {
-      continue;
-    }
-    turns++;
-    const provider = message.provider ?? "";
-    const modelID = message.model ?? "Unknown model";
-    const key = `${provider}/${modelID}`;
-    let model = models.get(key);
-    if (!model) {
-      model = { provider, model: names.get(key) || modelID, costUSD: 0, priced: true };
-      models.set(key, model);
-    }
-    const amount = message.usage.cost?.total;
-    if (typeof amount !== "number" || !Number.isFinite(amount) || amount < 0) {
-      model.priced = false;
-      complete = false;
-      continue;
-    }
-    model.costUSD += amount;
-    totalCostUSD += amount;
+  for (const model of models.values()) {
+    totalCostUSD += model.costUSD;
+    complete &&= model.priced;
   }
   return {
     sessionCostUSD: complete && turns > 0 ? totalCostUSD : undefined,
-    modelCosts: Array.from(models.values(), (model) => ({
+    modelCosts: Array.from(models, ([key, model]) => ({
       provider: model.provider,
-      model: model.model,
+      model: names.get(key) || model.modelID,
       costUSD: model.priced ? model.costUSD : undefined,
     })),
+  };
+}
+
+async function listTranscripts(dir: string): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await listTranscripts(path));
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
+// Reads only the bytes appended since the last scan; returns whether the
+// counted turns changed. A read error keeps the cursor for the next scan.
+async function advanceTranscript(file: string, cursor: TranscriptCursor): Promise<boolean> {
+  let handle;
+  let changed = false;
+  try {
+    handle = await open(file, "r");
+    const { size } = await handle.stat();
+    if (size < cursor.offset) {
+      // Rewritten shorter than what we consumed: recount from the start.
+      changed = cursor.turns.size > 0;
+      cursor.offset = 0;
+      cursor.pending = Buffer.alloc(0);
+      cursor.turns.clear();
+    }
+    if (size === cursor.offset) {
+      return changed;
+    }
+    const appended = Buffer.alloc(size - cursor.offset);
+    const { bytesRead } = await handle.read(appended, 0, appended.length, cursor.offset);
+    cursor.offset += bytesRead;
+    const data = Buffer.concat([cursor.pending, appended.subarray(0, bytesRead)]);
+    const lastNewline = data.lastIndexOf(0x0a);
+    cursor.pending = Buffer.from(data.subarray(lastNewline + 1));
+    for (const line of data.subarray(0, Math.max(lastNewline, 0)).toString("utf8").split("\n")) {
+      // Cheap prefilter: tool results dominate transcript bytes.
+      if (!line.includes('"assistant"')) {
+        continue;
+      }
+      let entry: SessionEntry;
+      try {
+        entry = JSON.parse(line) as SessionEntry;
+      } catch {
+        continue;
+      }
+      const turn = assistantTurn(entry);
+      if (turn) {
+        cursor.turns.set(entry.id ?? `@${cursor.turns.size}`, turn);
+        changed = true;
+      }
+    }
+    return changed;
+  } catch {
+    return changed;
+  } finally {
+    await handle?.close();
+  }
+}
+
+// Totals every subagent transcript (task, eval agent(), workpool, advisor —
+// nested ones included) under the main session's artifacts directory. Killed
+// agents keep their transcript, so cancelled work stays counted.
+function createSubagentUsageTracker(dir: string): SubagentUsageTracker {
+  const cursors = new Map<string, TranscriptCursor>();
+  return {
+    async scan() {
+      const files = await listTranscripts(dir);
+      const present = new Set(files);
+      let changed = false;
+      for (const [file, cursor] of cursors) {
+        if (!present.has(file)) {
+          changed ||= cursor.turns.size > 0;
+          cursors.delete(file);
+        }
+      }
+      for (const file of files) {
+        let cursor = cursors.get(file);
+        if (!cursor) {
+          cursor = { offset: 0, pending: Buffer.alloc(0), turns: new Map() };
+          cursors.set(file, cursor);
+        }
+        changed = await advanceTranscript(file, cursor) || changed;
+      }
+      return changed;
+    },
+    *turns() {
+      for (const cursor of cursors.values()) {
+        yield* cursor.turns.values();
+      }
+    },
   };
 }
 
@@ -414,13 +583,17 @@ export default function registerOpenUsageStatusline(pi: OmpExtensionAPI): void {
   let costRefreshInProgress = false;
   let timerStarted = false;
   let renderVersion = 0;
+  let subagents: SubagentUsageTracker | undefined;
+  let subagentScanTimer: ReturnType<typeof setTimeout> | undefined;
+  let subagentScanInProgress = false;
+  let subagentRescanRequested = false;
 
   const publish = (): void => {
     const context = activeContext;
     if (!context) {
       return;
     }
-    const session = sessionRecordedCosts(context);
+    const session = sessionRecordedCosts(context, subagents?.turns() ?? []);
     const values = {
       sessionCostUSD: session.sessionCostUSD,
       modelCosts: session.modelCosts,
@@ -455,10 +628,45 @@ export default function registerOpenUsageStatusline(pi: OmpExtensionAPI): void {
     });
   };
 
+  const scanSubagents = (): void => {
+    const tracker = subagents;
+    if (!tracker) {
+      return;
+    }
+    if (subagentScanInProgress) {
+      subagentRescanRequested = true;
+      return;
+    }
+    subagentScanInProgress = true;
+    void tracker.scan().catch(() => false).then((changed) => {
+      subagentScanInProgress = false;
+      if (changed && subagents === tracker) {
+        publish();
+      }
+      if (subagentRescanRequested) {
+        subagentRescanRequested = false;
+        scheduleSubagentScan();
+      }
+    });
+  };
+
+  // Coalesces bursts of subagent activity into one incremental scan.
+  const scheduleSubagentScan = (): void => {
+    if (!subagents || subagentScanTimer !== undefined) {
+      return;
+    }
+    subagentScanTimer = setTimeout(() => {
+      subagentScanTimer = undefined;
+      scanSubagents();
+    }, SUBAGENT_SCAN_DEBOUNCE_MS);
+  };
+
   const refresh = (): void => {
     if (!activeContext) {
       return;
     }
+    // Fallback for subagent turns no event announced (e.g. out-of-process runs).
+    scheduleSubagentScan();
     const now = new Date();
     const today = localDate(now);
     if (costDate !== today) {
@@ -512,10 +720,19 @@ export default function registerOpenUsageStatusline(pi: OmpExtensionAPI): void {
   };
 
   const attach = (_event: unknown, context: OmpExtensionContext): void => {
+    // Subagent sessions load this extension too, with a no-op UI; their usage
+    // reaches the UI session through its artifacts scan instead.
+    if (!context.hasUI) {
+      return;
+    }
     activeContext = context;
+    const artifactsDir = context.sessionManager.getArtifactsDir();
+    subagents = artifactsDir ? createSubagentUsageTracker(artifactsDir) : undefined;
+    subagentUsageListeners.add(scheduleSubagentScan);
     context.ui.setStatus(STATUS_KEY, "OpenUsage loading...");
     context.ui.setWidget(STATUS_KEY, undefined, { placement: widgetPlacement(context.ui) });
     publish();
+    scanSubagents();
     refresh();
     if (!timerStarted) {
       timerStarted = true;
@@ -526,15 +743,28 @@ export default function registerOpenUsageStatusline(pi: OmpExtensionAPI): void {
   pi.on("session_start", attach);
   pi.on("session_switch", attach);
   pi.on("message_end", (_event, context) => {
+    if (!context.hasUI) {
+      // A subagent (at any depth) finished a turn.
+      signalSubagentUsage();
+      return;
+    }
     if (context.sessionManager.getSessionId() === activeContext?.sessionManager.getSessionId()) {
       activeContext = context;
       publish();
     }
   });
+  // Direct children report progress and start/finish/abort on the session bus.
+  for (const channel of SUBAGENT_CHANNELS) {
+    pi.events.on(channel, signalSubagentUsage);
+  }
   pi.on("session_shutdown", () => {
     activeContext?.ui.setWidget(STATUS_KEY, undefined, { placement: "belowFooter" });
     activeContext?.ui.setStatus(STATUS_KEY, undefined);
     activeContext = undefined;
     renderVersion++;
+    subagentUsageListeners.delete(scheduleSubagentScan);
+    clearTimeout(subagentScanTimer);
+    subagentScanTimer = undefined;
+    subagents = undefined;
   });
 }
