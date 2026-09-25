@@ -150,6 +150,42 @@ malformed-line
 	}
 }
 
+func TestProvider_Fetch_RecordedOmpCost(t *testing.T) {
+	root := t.TempDir()
+	body := `{"type":"title","v":1,"title":"cost"}
+{"type":"session","id":"omp_ses_cost","timestamp":"2026-01-01T23:58:00Z","cwd":"/work"}
+{"type":"message","timestamp":"2026-01-01T23:59:00Z","message":{"role":"assistant","model":"m","provider":"openai-codex","usage":{"input":20,"cost":{"total":0.50}}}}
+{"type":"message","timestamp":"2026-01-02T00:01:00Z","message":{"role":"assistant","model":"m","provider":"anthropic","usage":{"input":40,"cost":{"total":1.25}}}}
+{"type":"message","timestamp":"2026-01-02T00:02:00Z","message":{"role":"assistant","model":"m","provider":"anthropic","usage":{"input":10}}}
+{"type":"message","timestamp":"2026-01-02T00:03:00Z","message":{"role":"assistant","model":"m","provider":"anthropic","usage":{"input":10,"cost":{"total":-10}}}}
+`
+	if err := os.WriteFile(filepath.Join(root, "session.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	p := New()
+	p.clock = fixedClock{t: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)}
+	acct := core.AccountConfig{ID: "pi", Provider: "pi", Auth: "local"}
+	acct.SetPath("sessions_dir", filepath.Join(root, "missing-pi"))
+	acct.SetPath("omp_sessions_dir", root)
+	snap, err := p.Fetch(context.Background(), acct)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if cost := snap.Metrics["total_cost_usd"].Used; cost == nil || *cost != 1.75 {
+		t.Fatalf("recorded total cost = %v, want 1.75", cost)
+	}
+	days := snap.DailySeries["cost_usd"]
+	if len(days) != 2 ||
+		days[0].Date != "2026-01-01" || days[0].Value != 0.50 ||
+		days[1].Date != "2026-01-02" || days[1].Value != 1.25 {
+		t.Errorf("recorded daily cost = %v, want Jan 1 $0.50 and Jan 2 $1.25", days)
+	}
+	if tokens := snap.Metrics["total_input_tokens"].Used; tokens == nil || *tokens != 80 {
+		t.Errorf("input tokens = %v, want all 80 including unpriced turns", tokens)
+	}
+}
+
 func TestProvider_Fetch_EmptyDir(t *testing.T) {
 	root := t.TempDir()
 	p := New()

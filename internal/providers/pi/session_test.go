@@ -212,6 +212,24 @@ func TestReadPiSessionFile_AllZeroTokensFiltered(t *testing.T) {
 	}
 }
 
+func TestReadPiSessionFile_RecordedCostWithoutTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	body := `{"type":"session","id":"omp_ses_cost"}
+{"type":"message","message":{"role":"assistant","model":"m","usage":{"input":0,"output":0,"cost":{"total":0.25}}}}
+{"type":"message","message":{"role":"assistant","model":"m","usage":{"input":0,"cost":{"total":-1}}}}
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	entries, _, err := readPiSessionFile(path)
+	if err != nil {
+		t.Fatalf("readPiSessionFile: %v", err)
+	}
+	if len(entries) != 1 || !entries[0].HasCost || entries[0].CostUSD != 0.25 {
+		t.Fatalf("recorded cost-only turn = %+v, want one $0.25 turn", entries)
+	}
+}
+
 func TestWorkspaceLabel(t *testing.T) {
 	cases := []struct {
 		in, want string

@@ -1,0 +1,329 @@
+diff --git a/docs/extensions.md b/docs/extensions.md
+index 4bf28f7451..778438d523 100644
+--- a/docs/extensions.md
++++ b/docs/extensions.md
+@@ -669,7 +669,9 @@ Current no-op methods in this controller:
+ - `setFooter`
+ - `setHeader`
+ 
+-`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines). `setEditorText` and `pasteToEditor` schedule a repaint after mutating the editor, so prompt changes don't leave stale content on screen.
++`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components via `setHookWidget(...)`: `placement: "aboveEditor"` (default), `"belowEditor"` (before the native status footer), or `"belowFooter"` (after the native status footer). String-array content is capped at 10 lines. Moving or clearing a widget key removes its previous placement. `setEditorText` and `pasteToEditor` schedule a repaint after mutating the editor, so prompt changes don't leave stale content on screen.
++
++Interactive widgets can inspect `ctx.ui.getNativeFooter(width)` for the current native footer without widget content. A `belowFooter` component may expose `footerColumnWidths: readonly number[]` to request minimum native column widths. Requests are combined across widgets and use only spare space after native overflow handling; they do not change saved settings or remove native fields. Clearing or moving the widgets releases their width requests.
+ 
+ ### RPC mode (`rpc-mode.ts`)
+ 
+diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
+index 9b210d6ba8..1d16e7a13e 100644
+--- a/packages/coding-agent/src/extensibility/extensions/types.ts
++++ b/packages/coding-agent/src/extensibility/extensions/types.ts
+@@ -202,7 +202,7 @@ export interface ExtensionUIDialogOptions {
+ /** Raw terminal input listener for extensions. */
+ export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
+ 
+-export type WidgetPlacement = "aboveEditor" | "belowEditor";
++export type WidgetPlacement = "aboveEditor" | "belowEditor" | "belowFooter";
+ 
+ export interface ExtensionWidgetOptions {
+ 	placement?: WidgetPlacement;
+@@ -269,6 +269,9 @@ export interface ExtensionUIContext {
+ 	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
+ 	setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
+ 
++	/** Read the native footer at the requested terminal width (interactive mode only). Excludes widgets. */
++	getNativeFooter?(width: number): readonly string[];
++
+ 	/** Set a custom footer component, or undefined to restore the built-in footer. */
+ 	setFooter(factory: ExtensionUiComponentFactory | undefined): void;
+ 
+diff --git a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+index a5c7678a99..608e0f8620 100644
+--- a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+@@ -77,6 +77,7 @@ export class ExtensionUiController {
+ 	#composerShapeDisposers: Array<() => void> = [];
+ 	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
+ 	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
++	#hookWidgetsBelowFooter = new Map<string, ExtensionUiComponent>();
+ 	// Single-file dialog surface (`editorContainer` + focus) is shared by the
+ 	// selector / input / editor modals, so only one may be presented at a time;
+ 	// the rest queue. See `#presentDialog`.
+@@ -119,6 +120,7 @@ export class ExtensionUiController {
+ 			setStatus: (key, text) => this.setHookStatus(key, text),
+ 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
+ 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
++			getNativeFooter: width => this.ctx.statusLine.render(width),
+ 			setTitle: title => setExtensionTerminalTitle(title),
+ 			custom: (factory, options) => this.showHookCustom(factory, options),
+ 			setEditorText: text => {
+@@ -335,13 +337,19 @@ export class ExtensionUiController {
+ 		const placement = options?.placement ?? "aboveEditor";
+ 		this.#removeHookWidget(this.#hookWidgetsAbove, key);
+ 		this.#removeHookWidget(this.#hookWidgetsBelow, key);
++		this.#removeHookWidget(this.#hookWidgetsBelowFooter, key);
+ 
+ 		if (content === undefined) {
+ 			this.#rebuildHookWidgets();
+ 			return;
+ 		}
+ 
+-		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
++		let target = this.#hookWidgetsAbove;
++		if (placement === "belowEditor") {
++			target = this.#hookWidgetsBelow;
++		} else if (placement === "belowFooter") {
++			target = this.#hookWidgetsBelowFooter;
++		}
+ 		target.set(key, this.#createHookWidget(content));
+ 		this.#rebuildHookWidgets();
+ 	}
+@@ -372,6 +380,21 @@ export class ExtensionUiController {
+ 	#rebuildHookWidgets(): void {
+ 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgetsAbove, true, true);
+ 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgetsBelow, false, false);
++		this.#renderHookWidgetContainer(
++			this.ctx.hookWidgetContainerBelowFooter,
++			this.#hookWidgetsBelowFooter,
++			false,
++			false,
++		);
++		const columnWidths: number[] = [];
++		for (const widget of this.#hookWidgetsBelowFooter.values()) {
++			widget.footerColumnWidths?.forEach((width, index) => {
++				if (Number.isFinite(width) && width > 0) {
++					columnWidths[index] = Math.max(columnWidths[index] ?? 0, Math.ceil(width));
++				}
++			});
++		}
++		this.ctx.statusLine.setFooterColumnWidths(columnWidths);
+ 		this.ctx.ui.requestRender();
+ 	}
+ 
+@@ -1207,8 +1230,12 @@ export class ExtensionUiController {
+ 		for (const widget of this.#hookWidgetsBelow.values()) {
+ 			widget.dispose?.();
+ 		}
++		for (const widget of this.#hookWidgetsBelowFooter.values()) {
++			widget.dispose?.();
++		}
+ 		this.#hookWidgetsAbove.clear();
+ 		this.#hookWidgetsBelow.clear();
++		this.#hookWidgetsBelowFooter.clear();
+ 		this.#rebuildHookWidgets();
+ 	}
+ 
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+index e8de2b0111..02ee60d98e 100644
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -970,6 +970,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	attachmentChipsContainer: Container;
+ 	hookWidgetContainerAbove: Container;
+ 	hookWidgetContainerBelow: Container;
++	hookWidgetContainerBelowFooter: Container;
+ 	statusLine: StatusLineComponent;
+ 
+ 	isInitialized = false;
+@@ -1518,6 +1519,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		this.hookWidgetContainerAbove = new Container();
+ 		this.hookWidgetContainerAbove.addChild(new EditorTopGap(() => this.statusRowOccupied));
+ 		this.hookWidgetContainerBelow = new Container();
++		this.hookWidgetContainerBelowFooter = new Container();
+ 		this.attachmentChipsContainer = new Container();
+ 		this.attachmentChipsContainer.addChild(
+ 			new AttachmentChipsBand(this.editor, this.ui.imageBudget, () => this.ui.requestRender()),
+@@ -1766,7 +1768,10 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			this.#persistComposerStatus();
+ 			this.ui.requestRender();
+ 		});
+-		this.composer.setStatusComponent(this.statusLine);
++		const footerArea = new Container();
++		footerArea.addChild(this.statusLine);
++		footerArea.addChild(this.hookWidgetContainerBelowFooter);
++		this.composer.setStatusComponent(footerArea);
+ 
+ 		this.composer.setRuntimeChildren(
+ 			[
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-types.ts b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+index a3c06de16e..ed241fbd64 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-types.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+@@ -511,7 +511,7 @@ export type RpcExtensionUIRequest =
+ 			method: "setWidget";
+ 			widgetKey: string;
+ 			widgetLines: string[] | undefined;
+-			widgetPlacement?: "aboveEditor" | "belowEditor";
++			widgetPlacement?: "aboveEditor" | "belowEditor" | "belowFooter";
+ 	  }
+ 	| { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
+ 	| { type: "extension_ui_request"; id: string; method: "set_editor_text"; text: string }
+diff --git a/packages/coding-agent/src/modes/types.ts b/packages/coding-agent/src/modes/types.ts
+index 1393c4b9cd..603ffa4483 100644
+--- a/packages/coding-agent/src/modes/types.ts
++++ b/packages/coding-agent/src/modes/types.ts
+@@ -125,6 +125,7 @@ export interface InteractiveModeContext {
+ 	editorContainer: Container;
+ 	hookWidgetContainerAbove: Container;
+ 	hookWidgetContainerBelow: Container;
++	hookWidgetContainerBelowFooter: Container;
+ 	statusLine: StatusLineComponent;
+ 	syncComposerShape(): void;
+ 
+diff --git a/packages/coding-agent/test/modes/controllers/extension-ui-controller.test.ts b/packages/coding-agent/test/modes/controllers/extension-ui-controller.test.ts
+index aa863efabf..6c4125d96d 100644
+--- a/packages/coding-agent/test/modes/controllers/extension-ui-controller.test.ts
++++ b/packages/coding-agent/test/modes/controllers/extension-ui-controller.test.ts
+@@ -94,6 +94,46 @@ function makeHarness() {
+ 	};
+ }
+ 
++describe("ExtensionUiController widget placement", () => {
++	it("moves and removes a widget without leaving stale footer content", () => {
++		const above = new Container();
++		const below = new Container();
++		const footer = new Container();
++		const controller = new ExtensionUiController({
++			hookWidgetContainerAbove: above,
++			hookWidgetContainerBelow: below,
++			hookWidgetContainerBelowFooter: footer,
++			ui: { requestRender() {} },
++			statusLine: { setFooterColumnWidths() {} },
++		} as unknown as InteractiveModeContext);
++
++		controller.setHookWidget("usage", ["costs"], { placement: "belowEditor" });
++		expect(below.render(80).join("\n")).toContain("costs");
++		controller.setHookWidget("usage", ["updated costs"], { placement: "belowFooter" });
++		expect(below.render(80)).toEqual([]);
++		expect(footer.render(80).join("\n")).toContain("updated costs");
++
++		controller.setHookWidget("usage", ["quota"], { placement: "aboveEditor" });
++		expect(footer.render(80)).toEqual([]);
++		expect(above.render(80).join("\n")).toContain("quota");
++
++		const dispose = vi.fn();
++		controller.setHookWidget(
++			"usage",
++			() => ({
++				render: () => ["live costs"],
++				invalidate() {},
++				dispose,
++			}),
++			{ placement: "belowFooter" },
++		);
++		controller.clearHookWidgets();
++		expect(dispose).toHaveBeenCalledTimes(1);
++		expect(footer.render(80)).toEqual([]);
++		expect(above.render(80).join("\n")).not.toContain("quota");
++	});
++});
++
+ describe("ExtensionUiController Ask dialog input", () => {
+ 	const questions: ExtensionAskDialogQuestion[] = [
+ 		{ id: "answer", question: "Choose an answer?", options: [{ label: "Default" }] },
+diff --git a/packages/coding-agent/test/status-line-segment-padding.test.ts b/packages/coding-agent/test/status-line-segment-padding.test.ts
+index a92779e652..4668901b2f 100644
+--- a/packages/coding-agent/test/status-line-segment-padding.test.ts
++++ b/packages/coding-agent/test/status-line-segment-padding.test.ts
+@@ -86,6 +86,27 @@ function firstSeparatorGap(bar: string): { before: number; after: number } {
+ }
+ 
+ describe("status line segment padding", () => {
++	it("shares spare width with widgets without dropping native fields, then restores it", () => {
++		const component = makeComponent();
++		try {
++			const original = component.renderBottomBar(80, "full");
++			const originalPlain = original.replace(/\x1b\[[0-9;]*m/g, "");
++			component.setFooterColumnWidths([8]);
++			const widened = component.renderBottomBar(80, "full").replace(/\x1b\[[0-9;]*m/g, "");
++			expect(widened.indexOf("·")).toBe(1 + 8 + 1); // Gutter + requested column + separator spacing.
++
++			const narrowWidth = originalPlain.length + 2;
++			const narrow = component.renderBottomBar(narrowWidth, "full").replace(/\x1b\[[0-9;]*m/g, "");
++			expect(narrow.length).toBeLessThanOrEqual(narrowWidth);
++			expect(narrow.replace(/ +· /, " · ")).toBe(originalPlain);
++
++			component.setFooterColumnWidths([]);
++			expect(component.renderBottomBar(80, "full")).toBe(original);
++		} finally {
++			component.dispose();
++		}
++	});
++
+ 	it("keeps a single-space gap at the first separator while a turn runs", () => {
+ 		const now = 1_000_000;
+ 		vi.spyOn(Date, "now").mockImplementation(() => now);
+diff --git a/packages/tui/src/chat/extension-types.ts b/packages/tui/src/chat/extension-types.ts
+index d2b92c5b3b..813a86e531 100644
+--- a/packages/tui/src/chat/extension-types.ts
++++ b/packages/tui/src/chat/extension-types.ts
+@@ -2,7 +2,11 @@ import type { Component, TUI } from "../tui";
+ import type { Theme } from "../theme/theme";
+ import type { CustomMessage, HookMessage } from "./messages";
+ 
+-export type ExtensionUiComponent = Component & { dispose?(): void };
++export type ExtensionUiComponent = Component & {
++	dispose?(): void;
++	/** Preferred native column widths for below-footer widgets, applied only when space permits. */
++	readonly footerColumnWidths?: readonly number[];
++};
+ 
+ export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionUiComponent;
+ 
+diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
+index 96f70592eb..aef9e85d00 100644
+--- a/packages/tui/src/status-line/component.ts
++++ b/packages/tui/src/status-line/component.ts
+@@ -449,6 +449,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 	#standalone: false | "full" | "left-only" = false;
+ 	#topAttachment: ComposerStyle["statusAttachment"] = "top-border";
+ 	#standaloneGap = false;
++	#footerColumnWidths: readonly number[] = [];
+ 	#autocompleteActiveProbe: (() => boolean) | undefined;
+ 	#renderRevision = 0;
+ 	/** Fully rendered bars for the current revision/clock tick, keyed by layout. */
+@@ -737,6 +738,17 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 		this.#invalidateStatusLineRenderCache();
+ 	}
+ 
++	setFooterColumnWidths(widths: readonly number[]): void {
++		if (
++			widths.length === this.#footerColumnWidths.length &&
++			widths.every((width, index) => width === this.#footerColumnWidths[index])
++		) {
++			return;
++		}
++		this.#footerColumnWidths = widths;
++		this.#invalidateStatusLineRenderCache();
++	}
++
+ 	setRunningSubagents(agentIds: readonly string[]): void {
+ 		if (
+ 			agentIds.length === this.#runningSubagentIds.size &&
+@@ -2757,6 +2769,27 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+ 			}
+ 		}
+ 
++		// Share spare space with below-footer widgets without dropping native fields
++		// or changing the configured layout on narrow terminals.
++		if (plain && this.#footerColumnWidths.length > 0) {
++			let remaining = Math.max(0, topFillWidth - totalWidth());
++			let column = 0;
++			for (const group of [left, right]) {
++				for (let index = 0; index < group.length; index++, column++) {
++					const extra = Math.min(
++						remaining,
++						Math.max(0, (this.#footerColumnWidths[column] ?? 0) - visibleWidth(group[index])),
++					);
++					if (extra > 0) {
++						group[index] += padding(extra);
++						remaining -= extra;
++					}
++				}
++			}
++			leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
++			rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
++		}
++
+ 		const renderGroup = (parts: string[], direction: "left" | "right"): string => {
+ 			if (parts.length === 0) return "";
+ 			const sep = direction === "left" ? separatorDef.left : separatorDef.right;

@@ -47,22 +47,42 @@ type ompUsageAmount struct {
 }
 
 type ompQuotaStatus struct {
-	provider          string
 	window            string
 	remainingFraction float64
 	resetsAtMillis    int64
 }
 
+// The JSON form is intentionally limited to display values. OMP's response
+// also contains account metadata, which must never reach an extension status.
+type ompQuotaSummary struct {
+	Codex       string   `json:"codex"`
+	Claude      string   `json:"claude"`
+	Codex5hPct  *float64 `json:"codex5hPct,omitempty"`
+	Claude5hPct *float64 `json:"claude5hPct,omitempty"`
+	Error       string   `json:"error,omitempty"`
+}
+
 func newOmpStatuslineCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput, render bool
+	command := &cobra.Command{
 		Use:   "omp-statusline",
-		Short: "Print OMP quota remaining and reset time for a status line",
-		Args:  cobra.NoArgs,
-		Run: func(cmd *cobra.Command, _ []string) {
-			output, err := runOmpUsage(context.Background())
-			fmt.Fprintln(cmd.OutOrStdout(), renderOmpStatusline(output, err, time.Now()))
+		Short: "Show OMP quotas or configure the OpenUsage OMP footer",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if render {
+				return runOmpStatuslineRender(cmd.InOrStdin(), cmd.OutOrStdout(), jsonOutput)
+			}
+			output, commandErr := runOmpUsage(context.Background())
+			if !jsonOutput {
+				fmt.Fprintln(cmd.OutOrStdout(), renderOmpStatusline(output, commandErr, time.Now()))
+				return nil
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(summarizeOmpQuotas(output, commandErr, time.Now()))
 		},
 	}
+	command.Flags().BoolVar(&jsonOutput, "json", false, "emit display-safe quota fields for the OMP extension")
+	command.Flags().BoolVar(&render, "render", false, "render selected OMP status and quota rows from extension JSON on stdin")
+	command.AddCommand(newOmpStatuslineInstallCommand(), newOmpStatuslineCostsCommand())
+	return command
 }
 
 func runOmpUsage(parent context.Context) ([]byte, error) {
@@ -92,41 +112,116 @@ func renderOmpStatusline(output []byte, commandErr error, now time.Time) string 
 		return "openusage: quota unavailable (invalid omp JSON)"
 	}
 
-	status, found := selectOmpQuota(response)
-	if !found {
-		return "openusage: quota unavailable (no quota data)"
+	quotas, available := selectOmpQuotas(response)
+	if !available[0] && !available[1] {
+		return "openusage: quota unavailable (no Codex or Claude data)"
 	}
 
-	remainingPercent := math.Round(status.remainingFraction * 100)
-	reset := formatOmpReset(status.resetsAtMillis, now)
-	return fmt.Sprintf("openusage %s %s %.0f%% left; reset %s", status.provider, status.window, remainingPercent, reset)
+	segments := [2]string{"Codex n/a", "Claude n/a"}
+	if available[0] {
+		segments[0] = formatOmpQuota("Codex", quotas[0], now)
+	}
+	if available[1] {
+		segments[1] = formatOmpQuota("Claude", quotas[1], now)
+	}
+	return "🐙 " + strings.Join(segments[:], " | ")
 }
 
-func selectOmpQuota(response ompUsageResponse) (ompQuotaStatus, bool) {
-	var selected ompQuotaStatus
-	found := false
+func summarizeOmpQuotas(output []byte, commandErr error, now time.Time) ompQuotaSummary {
+	summary := ompQuotaSummary{Codex: "Codex n/a", Claude: "Claude n/a"}
+	if commandErr != nil {
+		summary.Error = renderOmpStatusline(output, commandErr, now)
+		return summary
+	}
+	var response ompUsageResponse
+	if err := json.Unmarshal(output, &response); err != nil {
+		summary.Error = "openusage: quota unavailable (invalid omp JSON)"
+		return summary
+	}
+	quotas, available := selectOmpQuotas(response)
+	if !available[0] && !available[1] {
+		summary.Error = "openusage: quota unavailable (no Codex or Claude data)"
+		return summary
+	}
+	if available[0] {
+		summary.Codex = formatOmpQuota("Codex", quotas[0], now)
+	}
+	if available[1] {
+		summary.Claude = formatOmpQuota("Claude", quotas[1], now)
+	}
+	for _, report := range response.Reports {
+		index := ompProviderIndex(report.Provider)
+		if index < 0 {
+			continue
+		}
+		for _, limit := range report.Limits {
+			if ompWindowLabel(limit.Window) != "5h" {
+				continue
+			}
+			fraction, ok := ompRemainingFraction(limit.Amount)
+			if !ok {
+				continue
+			}
+			percent := math.Round((1 - fraction) * 100)
+			if index == 0 && (summary.Codex5hPct == nil || percent > *summary.Codex5hPct) {
+				summary.Codex5hPct = &percent
+			}
+			if index == 1 && (summary.Claude5hPct == nil || percent > *summary.Claude5hPct) {
+				summary.Claude5hPct = &percent
+			}
+		}
+	}
+	return summary
+}
+
+// Select the tightest valid window independently for each tool. An unrelated
+// provider must not displace either quota from the OMP footer.
+func selectOmpQuotas(response ompUsageResponse) ([2]ompQuotaStatus, [2]bool) {
+	var quotas [2]ompQuotaStatus
+	var available [2]bool
 
 	for _, report := range response.Reports {
+		index := ompProviderIndex(report.Provider)
+		if index < 0 {
+			continue
+		}
 		for _, limit := range report.Limits {
 			fraction, ok := ompRemainingFraction(limit.Amount)
 			if !ok {
 				continue
 			}
 
-			candidate := ompQuotaStatus{
-				provider:          safeOmpLabel(report.Provider, "provider"),
-				window:            ompWindowLabel(limit.Window),
-				remainingFraction: fraction,
-				resetsAtMillis:    limit.Window.ResetsAt,
-			}
-			if !found || candidate.remainingFraction < selected.remainingFraction {
-				selected = candidate
-				found = true
+			if !available[index] || fraction < quotas[index].remainingFraction {
+				quotas[index] = ompQuotaStatus{
+					window:            ompWindowLabel(limit.Window),
+					remainingFraction: fraction,
+					resetsAtMillis:    limit.Window.ResetsAt,
+				}
+				available[index] = true
 			}
 		}
 	}
+	return quotas, available
+}
 
-	return selected, found
+func ompProviderIndex(provider string) int {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "openai-codex":
+		return 0
+	case "anthropic", "claude", "claude-code", "claude_code":
+		return 1
+	default:
+		return -1
+	}
+}
+
+func formatOmpQuota(provider string, quota ompQuotaStatus, now time.Time) string {
+	usedPercent := math.Round((1 - quota.remainingFraction) * 100)
+	status := fmt.Sprintf("%s %s %.0f%% used", provider, quota.window, usedPercent)
+	if quota.resetsAtMillis > 0 {
+		status += " (reset " + formatOmpReset(quota.resetsAtMillis, now) + ")"
+	}
+	return status
 }
 
 func ompRemainingFraction(amount ompUsageAmount) (float64, bool) {
@@ -150,6 +245,12 @@ func validOmpFraction(fraction float64) bool {
 }
 
 func ompWindowLabel(window ompUsageWindow) string {
+	switch strings.ToLower(strings.TrimSpace(window.Label)) {
+	case "5 hours":
+		return "5h"
+	case "7 days":
+		return "7d"
+	}
 	if label := safeOmpLabel(window.Label, ""); label != "" {
 		return label
 	}

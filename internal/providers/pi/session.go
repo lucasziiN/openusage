@@ -39,10 +39,15 @@ type piMessageBody struct {
 }
 
 type piUsage struct {
-	Input      *int64 `json:"input,omitempty"`
-	Output     *int64 `json:"output,omitempty"`
-	CacheRead  *int64 `json:"cacheRead,omitempty"`
-	CacheWrite *int64 `json:"cacheWrite,omitempty"`
+	Input      *int64       `json:"input,omitempty"`
+	Output     *int64       `json:"output,omitempty"`
+	CacheRead  *int64       `json:"cacheRead,omitempty"`
+	CacheWrite *int64       `json:"cacheWrite,omitempty"`
+	Cost       *piUsageCost `json:"cost,omitempty"`
+}
+
+type piUsageCost struct {
+	Total *float64 `json:"total,omitempty"`
 }
 
 type piSessionMeta struct {
@@ -61,6 +66,8 @@ type piModelEntry struct {
 	Output         int64
 	CacheRead      int64
 	CacheWrite     int64
+	CostUSD        float64
+	HasCost        bool
 	Timestamp      time.Time
 }
 
@@ -145,7 +152,12 @@ func readPiSessionFile(path string) ([]piModelEntry, piSessionMeta, error) {
 			CacheRead:      nonNegative(line.Message.Usage.CacheRead),
 			CacheWrite:     nonNegative(line.Message.Usage.CacheWrite),
 		}
-		if entry.Input == 0 && entry.Output == 0 && entry.CacheRead == 0 && entry.CacheWrite == 0 {
+		if cost := line.Message.Usage.Cost; cost != nil && cost.Total != nil && *cost.Total >= 0 {
+			entry.CostUSD = *cost.Total
+			entry.HasCost = true
+		}
+		if entry.Input == 0 && entry.Output == 0 && entry.CacheRead == 0 && entry.CacheWrite == 0 &&
+			(!entry.HasCost || entry.CostUSD == 0) {
 			continue
 		}
 
