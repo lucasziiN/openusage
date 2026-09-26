@@ -144,8 +144,9 @@ Claude Code cost formatter—same emojis, cost group and burn rate—with ChatGP
 and Claude quotas on separate rows and per-model session costs beneath each.
 Select segments with `openusage omp-statusline install`, then load the extension.
 OMP's native model/context row appears above OpenUsage with its contents unchanged.
-This order requires the documented local OMP layout patch (rebuild it with
-`integrations/omp/rebuild-omp-patched.sh` after `omp update`); no OpenUsage daemon is needed.
+This order requires the documented local OMP layout patch (update with the
+`omp-update` PowerShell command, or rerun `integrations/omp/rebuild-omp-patched.sh`
+after `omp update`); no OpenUsage daemon is needed.
 
 ## Track coding agent usage across multiple platforms
 

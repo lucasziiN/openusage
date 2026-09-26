@@ -38,13 +38,13 @@ Live checks covered provider/model contrast, text following highlighted amounts,
 
 ### Required local OMP layout patch
 
-Stock OMP only supports widgets above or below the editor, both before its native footer. This extension's full layout requires the local patch in `integrations/omp/omp-below-footer.patch`, including `belowFooter`, native-footer inspection and shared column sizing; merely updating OpenUsage is not sufficient. The patch currently targets OMP `v18.3.1` (first written for `v18.3.0`).
+Stock OMP only supports widgets above or below the editor, both before its native footer. This extension's full layout requires the local patch in `integrations/omp/omp-below-footer.patch`, including `belowFooter`, native-footer inspection and shared column sizing; merely updating OpenUsage is not sufficient. The patch currently applies cleanly to OMP `v18.3.2` (first written for `v18.3.0`).
 
 Build and install it with the script beside the patch, from Git Bash:
 
 ```bash
 integrations/omp/rebuild-omp-patched.sh          # latest OMP release
-integrations/omp/rebuild-omp-patched.sh 18.3.1   # a specific release
+integrations/omp/rebuild-omp-patched.sh 18.3.2   # a specific release
 ```
 
 The script creates a worktree of a clean OMP source checkout (`OMP_SRC`, default `~/dev/omp-layout`) at the release tag, applies the patch, downloads the matching `@oh-my-pi/pi-natives-win32-x64` addon from npm, runs `bun install --frozen-lockfile`, the patch's tests and `bun run build`, verifies the result, then installs it next to `omp` on `PATH` (`OMP_INSTALL_DIR` overrides). It uses `bun` from `PATH` if present, otherwise the installed `omp.exe` in Bun mode (`BUN_BE_BUN=1`). The previous binary is kept as `omp-<version>-<timestamp>.exe.bak`. If the patch no longer applies to a new release, the script stops and names the worktree to resolve and the command that refreshes the patch.
@@ -54,6 +54,14 @@ The patch adds a third placement without reordering other extensions. It preserv
 #### After `omp update`
 
 `omp update` installs a stock release over the patched build. The extension feature-detects the patch, so on stock OMP it keeps working in a degraded layout instead of failing: the widget moves below the editor, columns follow OpenUsage's own widths rather than the native footer, and the status line shows `OpenUsage: stock OMP, run rebuild-omp-patched.sh`. Run the script to restore the full layout.
+
+To update and restore the patch in one step, use `omp-update` from Windows PowerShell instead of `omp update`. Load it once from your profile (`notepad $PROFILE`):
+
+```powershell
+. "$HOME\dev\openusage-omp\integrations\omp\omp-update.ps1"
+```
+
+`omp-update` runs `omp update` (arguments pass through, so `omp-update --check` only checks). If the installed binary no longer contains the patch, it rebuilds the installed version with `rebuild-omp-patched.sh` through Git Bash (`%ProgramFiles%\Git\bin\bash.exe`); otherwise it reports that nothing needs rebuilding. If `omp update` fails, nothing else runs. If the rebuild fails—typically because a new release conflicts with the patch—stock OMP stays installed and working in the degraded layout until the patch is refreshed.
 
 ## Install OpenUsage on Windows
 
