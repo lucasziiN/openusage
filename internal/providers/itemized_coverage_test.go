@@ -20,7 +20,7 @@ func TestItemizedCoverage(t *testing.T) {
 	wantItemized := map[string]bool{
 		"amp": true, "codebuff": true, "openclaw": true, "roocode": true,
 		"kilo_code": true, "crush": true, "goose": true, "hermes": true,
-		"zed": true, "droid": true, "kiro_cli": true,
+		"zed": true, "droid": true, "kiro_cli": true, "pi": true,
 	}
 
 	gotTelemetry := map[string]bool{}

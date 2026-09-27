@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/janekbaraniewski/openusage/internal/fileutil"
 )
 
 // DefaultTTL is the cache freshness window used when OPENUSAGE_PRICING_TTL
@@ -68,7 +70,7 @@ func (c *DiskCache) Load(name string) ([]byte, time.Time, bool, error) {
 		}
 		return nil, time.Time{}, false, fmt.Errorf("pricing: stat cache %s: %w", path, err)
 	}
-	data, err := readCacheFile(path)
+	data, err := fileutil.ReadFile(path)
 	if err != nil {
 		return nil, time.Time{}, false, fmt.Errorf("pricing: read cache %s: %w", path, err)
 	}
@@ -107,7 +109,7 @@ func (c *DiskCache) Store(name string, data []byte) error {
 		cleanup()
 		return fmt.Errorf("pricing: closing temp cache: %w", err)
 	}
-	if err := atomicReplace(tmpPath, final); err != nil {
+	if err := fileutil.ReplaceFile(tmpPath, final); err != nil {
 		cleanup()
 		return fmt.Errorf("pricing: renaming temp cache: %w", err)
 	}

@@ -141,7 +141,13 @@ See the [statusline guide](docs/site/docs/guides/claude-code-statusline.md) for 
 
 The [Oh My Pi extension](docs/site/docs/guides/omp-statusline.md) reuses the
 Claude Code cost formatter—same emojis, cost group and burn rate—with ChatGPT
-and Claude quotas on separate rows and per-model session costs beneath each.
+and Claude quotas (both the 5h and 7d windows) on separate rows and per-model
+session costs beneath each, quota alerts in the transcript (limits, thresholds,
+run-out pace, disabled sign-ins) and Claude/OpenAI status-page incidents.
+Typing `/usage` in OMP opens an OpenUsage dashboard with quota pace projections,
+spend per quota window, 7-day limit history, today's spend by tool, monthly
+projection, token cache share, daily history and the top models, projects and
+sessions.
 Select segments with `openusage omp-statusline install`, then load the extension.
 OMP's native model/context row appears above OpenUsage with its contents unchanged.
 This order requires the documented local OMP layout patch (update with the

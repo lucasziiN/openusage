@@ -84,6 +84,7 @@ type Row struct {
 	TimeRemainingSeconds float64
 	BurnRateUSDPerHour   float64
 	ProjectedCost        float64
+	FirstActivity        time.Time // blocks: earliest event, the burn-rate origin
 	LastActivity         time.Time
 }
 

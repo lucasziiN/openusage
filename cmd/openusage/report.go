@@ -215,8 +215,10 @@ func gatherReportEvents(kind report.Kind, f *reportFlags) ([]report.Event, strin
 	}
 
 	// 4. Snapshot fallback for the remaining providers (periodic reports only).
+	// A single requested provider already covered above has nothing to add, so
+	// skip collecting every provider's snapshot just to discard them.
 	periodic := kind == report.KindDaily || kind == report.KindWeekly || kind == report.KindMonthly
-	if periodic {
+	if periodic && (provider == "" || !covered[provider]) {
 		ctx := context.Background()
 		snaps, _, err := export.Collect(ctx, export.Source(strings.ToLower(strings.TrimSpace(f.source))))
 		if err != nil {

@@ -62,10 +62,11 @@ func buildBlocks(events []Event, opts Options) Report {
 		}
 		if cur == nil {
 			cur = &Row{
-				Key:   blockStart.UTC().Format(time.RFC3339),
-				Label: blockStart.Format("2006-01-02 15:04"),
-				Start: blockStart,
-				End:   blockStart.Add(dur),
+				Key:           blockStart.UTC().Format(time.RFC3339),
+				Label:         blockStart.Format("2006-01-02 15:04"),
+				Start:         blockStart,
+				End:           blockStart.Add(dur),
+				FirstActivity: e.Time,
 			}
 		}
 		cur.add(e)
@@ -95,18 +96,22 @@ func buildBlocks(events []Event, opts Options) Report {
 	return rep
 }
 
+// minBurnSpan floors the activity span a block's burn rate is measured over:
+// two turns seconds apart would otherwise extrapolate to hundreds of dollars
+// an hour.
+const minBurnSpan = 10 * time.Minute
+
 // annotateBlock fills in burn rate, active flag and projection for a block.
 func annotateBlock(b *Row, now time.Time) {
 	active := now.Before(b.End) && !now.Before(b.Start) && now.Sub(b.LastActivity) < b.End.Sub(b.Start)
 	b.Active = active
 
-	durMin := b.LastActivity.Sub(b.Start).Minutes()
-	if durMin <= 0 {
-		// Single-entry block: treat as the elapsed time so the rate is finite.
-		durMin = now.Sub(b.Start).Minutes()
-	}
-	if durMin > 0 && b.Cost > 0 {
-		b.BurnRateUSDPerHour = b.Cost / durMin * 60.0
+	// The rate spans the block's own activity, first turn to last, as Claude
+	// Code's blocks do. Measuring from the hour-floored start would dilute it:
+	// $30 spent between 21:55 and 22:10 is $120/h, not $26/h. Activity at a
+	// single instant has no rate.
+	if span := b.LastActivity.Sub(b.FirstActivity); span > 0 && b.Cost > 0 {
+		b.BurnRateUSDPerHour = b.Cost / max(span, minBurnSpan).Minutes() * 60.0
 	}
 	if active {
 		b.TimeRemaining = b.End.Sub(now)

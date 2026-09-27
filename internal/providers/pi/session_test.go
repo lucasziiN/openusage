@@ -1,11 +1,14 @@
 package pi
 
 import (
+	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReadPiSessionFile_HappyPath(t *testing.T) {
@@ -271,5 +274,177 @@ func TestReadPiSessionFile_LongLine(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+}
+
+func TestReadPiSessionFile_KeepsTurnsAfterLinesOverOneMiB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	toolResult := `{"type":"message","message":{"role":"toolResult","content":"` + strings.Repeat("x", 3<<20) + `"}}`
+	body := `{"type":"session","id":"omp_ses_big","cwd":"/x"}` + "\n" + toolResult + "\n" +
+		`{"type":"message","id":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"input":1,"cost":{"total":2.5}}}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	entries, _, err := readPiSessionFile(path)
+	if err != nil {
+		t.Fatalf("readPiSessionFile: %v", err)
+	}
+	if len(entries) != 1 || entries[0].CostUSD != 2.5 {
+		t.Fatalf("turn after a 3 MiB tool result was lost: %+v", entries)
+	}
+}
+
+func TestReadPiSessionFile_CountsModelUsageSideCalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	// OMP records auto-thinking and judge calls as model_usage entries; their
+	// role is "judge", so no "assistant" appears on the line.
+	body := `{"type":"session","id":"omp_ses_side","timestamp":"2026-09-23T09:00:00Z","cwd":"/work/kete"}
+{"type":"model_usage","id":"54b93071","parentId":"92dbf2a3","timestamp":"2026-09-23T09:31:58.312Z","purpose":"auto-thinking","role":"judge","provider":"openai-codex","model":"gpt-6-luna","usage":{"input":255,"output":25,"cacheRead":7,"cacheWrite":3,"cost":{"total":0.25}}}
+{"type":"model_usage","id":"69558f4d","timestamp":"2026-09-23T09:32:50.131Z","provider":"openai-codex","model":"gpt-6-luna"}
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := readPiSessionFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := piModelEntry{
+		SessionID: "omp_ses_side", WorkspaceLabel: "kete", Provider: "openai-codex", Model: "gpt-6-luna",
+		Input: 255, Output: 25, CacheRead: 7, CacheWrite: 3, CostUSD: 0.25, HasCost: true,
+		Timestamp: time.Date(2026, 9, 23, 9, 31, 58, 312_000_000, time.UTC),
+		TurnKey:   "54b93071@2026-09-23T09:31:58.312Z",
+	}
+	if len(entries) != 1 || entries[0] != want {
+		t.Fatalf("side calls = %+v, want only the one with usage: %+v", entries, want)
+	}
+}
+
+func TestReadPiSessionFile_SessionTitle(t *testing.T) {
+	header := func(title string) string {
+		return `{"type":"session","id":"s","timestamp":"2026-09-23T09:00:00Z"` + title + "}\n"
+	}
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			// OMP rewrites the fixed-width first line in place on every retitle;
+			// the header keeps the title the session was created with.
+			name: "title record is newer than the header",
+			body: `{"type":"title","v":1,"title":"Audit statusline","updatedAt":"2026-09-24T15:20:02.126Z","pad":"   "}` + "\n" +
+				header(`,"title":"Deploy fixes"`),
+			want: "Audit statusline",
+		},
+		{
+			name: "empty title record falls back to the header",
+			body: `{"type":"title","v":1,"title":""}` + "\n" + header(`,"title":"Deploy fixes"`),
+			want: "Deploy fixes",
+		},
+		{
+			name: "untitled",
+			body: header(""),
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, meta, err := readPiSessionFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta.SessionID != "s" || meta.Title != tt.want {
+				t.Fatalf("session %q title %q, want s titled %q", meta.SessionID, meta.Title, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadAllSessions_ResolvesTurnsCopiedFromParents(t *testing.T) {
+	turn := func(id, at string, cost string) string {
+		return `{"type":"message","id":"` + id + `","timestamp":"` + at + `","message":{"role":"assistant","model":"m","usage":{"input":1,"cost":{"total":` + cost + `}}}}` + "\n"
+	}
+	parent := `{"type":"session","id":"parent","timestamp":"2026-09-26T04:49:59Z","cwd":"/work/room-for"}` + "\n" +
+		turn("a1", "2026-09-26T04:50:00.000Z", "10") + turn("a2", "2026-09-26T05:00:00.000Z", "20")
+	// A fork starts with its parent's entries verbatim, then continues.
+	fork := `{"type":"session","id":"fork","timestamp":"2026-09-26T08:55:54Z","cwd":"/work/room-for","parentSession":"parent"}` + "\n" +
+		turn("a1", "2026-09-26T04:50:00.000Z", "10") + turn("a2", "2026-09-26T05:00:00.000Z", "20") +
+		// A copy without an id cannot be matched to its original.
+		`{"type":"message","timestamp":"2026-09-26T05:10:00.000Z","message":{"role":"assistant","model":"m","usage":{"input":1,"cost":{"total":7}}}}` + "\n" +
+		turn("b1", "2026-09-26T09:00:00.000Z", "5") +
+		// Same short id as a parent turn but a different time: a distinct turn.
+		turn("a1", "2026-09-26T09:05:00.000Z", "1")
+	// /tan clones the session into its artifacts directory, zeroing the
+	// copies' cost, then works on in the clone.
+	tan := `{"type":"session","id":"tan","timestamp":"2026-09-26T06:00:00Z","cwd":"/work/room-for","parentSession":"parent"}` + "\n" +
+		turn("a1", "2026-09-26T04:50:00.000Z", "0") + turn("a2", "2026-09-26T05:00:00.000Z", "0") +
+		turn("c1", "2026-09-26T06:10:00.000Z", "3")
+	const (
+		parentFile = "2026-09-26T04-49-59Z_parent.jsonl"
+		tanFile    = "2026-09-26T04-49-59Z_parent/Tan-01a0dd1b.jsonl" // walked before its parent
+		forkFile   = "0-fork.jsonl"                                   // walked before the parent
+	)
+
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  map[string]float64 // spend by session id
+		turns int
+	}{
+		{
+			name:  "fork is counted once, in the parent",
+			files: map[string]string{parentFile: parent, forkFile: fork},
+			want:  map[string]float64{"parent": 30, "fork": 6},
+			turns: 4,
+		},
+		{
+			name:  "tan clone keeps the parent's priced turns",
+			files: map[string]string{parentFile: parent, tanFile: tan},
+			want:  map[string]float64{"parent": 30, "tan": 3},
+			turns: 3,
+		},
+		{
+			name:  "deleted parent leaves the fork's copies",
+			files: map[string]string{forkFile: fork},
+			want:  map[string]float64{"fork": 36},
+			turns: 4,
+		},
+		{
+			name:  "priced copy beats a zeroed one when the parent is gone",
+			files: map[string]string{tanFile: tan, forkFile: fork},
+			want:  map[string]float64{"fork": 36, "tan": 3},
+			turns: 5,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for name, body := range tt.files {
+				path := filepath.Join(root, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			entries, err := readAllSessions(context.Background(), []string{root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]float64{}
+			for _, entry := range entries {
+				got[entry.SessionID] += entry.CostUSD
+			}
+			if len(entries) != tt.turns || !maps.Equal(got, tt.want) {
+				t.Fatalf("%d turns, spend by session %v; want %d turns, %v", len(entries), got, tt.turns, tt.want)
+			}
+		})
 	}
 }

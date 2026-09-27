@@ -70,7 +70,11 @@ Oh My Pi transcripts may place a version 1 title record immediately before the s
 {"type": "session", "id": "...", "timestamp": "...", "cwd": "..."}
 ```
 
-Only this single versioned title record is accepted before an Oh My Pi session header. Files with a missing, malformed, or unexpected prefix are skipped rather than searched for a later header. After the header, only `message` records with `role: "assistant"` and a `usage` block are counted. Per-line decode errors are dropped individually so partial corruption never poisons a whole session.
+Only this single versioned title record is accepted before an Oh My Pi session header. Files with a missing, malformed, or unexpected prefix are skipped rather than searched for a later header. After the header, `message` records with `role: "assistant"` and a `usage` block are counted, and so are Oh My Pi `model_usage` records (side calls such as auto-thinking and judges, with `provider`, `model` and `usage` at the top level). Lines of any length are read, so a multi-megabyte tool result never hides the turns after it. Per-line decode errors are dropped individually so partial corruption never poisons a whole session. Files are opened with full sharing on Windows, so OMP can replace a transcript while it is being read.
+
+Forked, branched and continued Oh My Pi sessions (`parentSession` in the header) begin with a verbatim copy of their parent's entries, which keep their original timestamps; `/tan` clones copy them into the parent's artifacts directory with the cost zeroed. An entry older than its file's header timestamp is therefore a copy. Every file is read first, then one copy per turn (entry `id` + `timestamp`) is kept: the copy in the session where the turn happened, else the higher recorded cost. A copy survives on its own only when the original is gone (the parent session was deleted), so copied history is counted once, in the session where it happened, whatever order the files are walked in.
+
+Parsed files are cached in `openusage/pi-sessions-v1.gob` under the user cache directory (`%LOCALAPPDATA%` on Windows), keyed by path, size and modification time, so repeated reports re-read only transcripts that changed.
 
 ### Field mapping
 
@@ -98,7 +102,7 @@ Timestamps are parsed as RFC 3339. When a turn carries no timestamp the file's m
 
 ### Daily series
 
-`DailySeries["sessions"]` and `DailySeries["tokens"]` are populated by UTC day. When a message includes a nonnegative `usage.cost.total`, its recorded USD amount contributes to `DailySeries["cost_usd"]` for that day and the `total_cost_usd` metric. The dashboard and daily reports use these values directly rather than guessing a rate for the model.
+`DailySeries["sessions"]` and `DailySeries["tokens"]` are populated by UTC day. When a message includes a nonnegative `usage.cost.total`, its recorded USD amount contributes to `DailySeries["cost_usd"]` for that day and the `total_cost_usd` metric. The dashboard uses these values directly rather than guessing a rate for the model. The `daily`, `weekly`, `monthly`, `session` and `blocks` reports instead read every turn with its real timestamp, so `--since`/`--until` select turns by local calendar day.
 
 ### What's NOT tracked
 

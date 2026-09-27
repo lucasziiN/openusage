@@ -1,13 +1,12 @@
 // Package pi reads local Pi and OMP JSONL sessions, aggregating per-model
-// tokens and any cost recorded with assistant turns. No network calls or
-// authentication are required.
+// tokens and any cost recorded with assistant turns and OMP side calls. No
+// network calls or authentication are required.
 package pi
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -105,56 +104,6 @@ func (p *Provider) Fetch(ctx context.Context, acct core.AccountConfig) (core.Usa
 	snap.Status = core.StatusOK
 	snap.Message = buildStatusMessage(snap)
 	return snap, nil
-}
-
-func readAllSessions(ctx context.Context, dirs []string) ([]piModelEntry, error) {
-	var all []piModelEntry
-	seen := make(map[string]struct{})
-	for _, dir := range dirs {
-		walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				return nil
-			}
-			if filepath.Ext(path) != ".jsonl" {
-				return nil
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			canonical := canonicalPath(path)
-			if _, dup := seen[canonical]; dup {
-				return nil
-			}
-			seen[canonical] = struct{}{}
-
-			entries, _, perFileErr := readPiSessionFile(path)
-			if perFileErr != nil {
-				return nil
-			}
-			all = append(all, entries...)
-			return nil
-		})
-		if walkErr != nil {
-			return all, walkErr
-		}
-	}
-	return all, nil
-}
-
-func canonicalPath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		if abs, err := filepath.Abs(resolved); err == nil {
-			return abs
-		}
-		return resolved
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		return abs
-	}
-	return path
 }
 
 func populateSnapshot(snap *core.UsageSnapshot, entries []piModelEntry, now time.Time) {

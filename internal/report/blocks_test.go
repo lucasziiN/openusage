@@ -60,6 +60,58 @@ func TestBuildBlocks_ActiveBlockBurnAndProjection(t *testing.T) {
 	}
 }
 
+func TestBuildBlocks_BurnRateSpan(t *testing.T) {
+	// Blocks here are floored to 21:00 and end at 02:00.
+	turn := func(when string, cost float64) Event {
+		return Event{Time: at(when), Provider: "pi", Model: "opus", Cost: cost, Input: 100}
+	}
+	tests := []struct {
+		name          string
+		events        []Event
+		now           string
+		wantBurn      float64
+		wantProjected float64
+	}{
+		{
+			// $30 over 15 minutes of activity is $120/h, not diluted from
+			// 21:00; 3h50m remain until 02:00.
+			name:          "measured from the first turn to the last",
+			events:        []Event{turn("2026-06-01T21:55:00Z", 10), turn("2026-06-01T22:10:00Z", 20)},
+			now:           "2026-06-01T22:10:00Z",
+			wantBurn:      120,
+			wantProjected: 490,
+		},
+		{
+			name:          "one turn has no rate to extrapolate",
+			events:        []Event{turn("2026-06-01T21:55:00Z", 10)},
+			now:           "2026-06-01T21:56:00Z",
+			wantBurn:      0,
+			wantProjected: 10,
+		},
+		{
+			// $5 over 30 seconds would be $600/h; spread over ten minutes it
+			// is $30/h, and 244.5 minutes remain.
+			name:          "turns seconds apart span at least ten minutes",
+			events:        []Event{turn("2026-06-01T21:55:00Z", 2), turn("2026-06-01T21:55:30Z", 3)},
+			now:           "2026-06-01T21:55:30Z",
+			wantBurn:      30,
+			wantProjected: 127.25,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			active, ok := Build(tt.events, Options{Kind: KindBlocks, Now: at(tt.now)}).ActiveBlock()
+			if !ok {
+				t.Fatal("expected an active block")
+			}
+			if active.BurnRateUSDPerHour != tt.wantBurn || active.ProjectedCost != tt.wantProjected {
+				t.Fatalf("burn = %v projected = %v, want $%v/h and $%v",
+					active.BurnRateUSDPerHour, active.ProjectedCost, tt.wantBurn, tt.wantProjected)
+			}
+		})
+	}
+}
+
 func TestBuildBlocks_ExcludesSyntheticWithNote(t *testing.T) {
 	e := Event{Time: at("2026-06-01T10:00:00Z"), Provider: "openrouter", Model: "(total)", Cost: 5, Synthetic: true}
 	rep := Build([]Event{e}, Options{Kind: KindBlocks, Now: at("2026-06-01T12:00:00Z")})
