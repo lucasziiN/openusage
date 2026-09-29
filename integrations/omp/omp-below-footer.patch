@@ -113,7 +113,7 @@ index 6bb04220b9..a0d4198a5f 100644
  	}
  
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 23124bd828..d057f7051a 100644
+index 23124bd828..a4d9d17e2c 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
 @@ -1078,6 +1078,7 @@ export class InteractiveMode implements InteractiveModeContext {
@@ -132,15 +132,12 @@ index 23124bd828..d057f7051a 100644
  		this.attachmentChipsContainer = new Container();
  		const attachmentChips = new AttachmentChipsBand(this.editor, this.ui.imageBudget, () => this.ui.requestRender());
  		this.attachmentChipsContainer.addChild(attachmentChips);
-@@ -1981,7 +1983,10 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -1981,7 +1983,7 @@ export class InteractiveMode implements InteractiveModeContext {
  		this.#headerAfter = headerAfter;
  		this.composer.setHeaderExtras(headerBefore, headerAfter);
  		this.statusLine.watchBranch(() => this.ui.requestRender());
 -		this.composer.setStatusComponent(this.statusLine);
-+		const footerArea = new Container();
-+		footerArea.addChild(this.statusLine);
-+		footerArea.addChild(this.hookWidgetContainerBelowFooter);
-+		this.composer.setStatusComponent(footerArea);
++		this.composer.setStatusComponent(this.statusLine, this.hookWidgetContainerBelowFooter);
  
  		this.composer.setRuntimeChildren(
  			[
@@ -269,8 +266,39 @@ index d2b92c5b3b..813a86e531 100644
  
  export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionUiComponent;
  
+diff --git a/packages/tui/src/prompt/composer.ts b/packages/tui/src/prompt/composer.ts
+index 610350fb6c..dc1a11d437 100644
+--- a/packages/tui/src/prompt/composer.ts
++++ b/packages/tui/src/prompt/composer.ts
+@@ -881,12 +881,23 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
+ 	/**
+ 	 * Mount the session-aware status component into the slot below the editor,
+ 	 * retiring the startup status line; the caller installs the real top-border
+-	 * provider through its composer-shape sync.
++	 * provider through its composer-shape sync. `belowStatus` renders directly
++	 * under the status line (extension widgets placed `belowFooter`).
+ 	 */
+-	setStatusComponent<TSession extends StatusLineSession>(component: StatusLineComponent<TSession>): void {
++	setStatusComponent<TSession extends StatusLineSession>(
++		component: StatusLineComponent<TSession>,
++		belowStatus?: Component,
++	): void {
+ 		if (this.#startupStatus) component.adoptGitStatus(this.#startupStatus);
+ 		this.#disposeStartupStatus();
+-		this.#statusHost.setComponent(component);
++		if (belowStatus) {
++			const footerArea = new Container();
++			footerArea.addChild(component);
++			footerArea.addChild(belowStatus);
++			this.#statusHost.setComponent(footerArea);
++		} else {
++			this.#statusHost.setComponent(component);
++		}
+ 		this.editor.setTopBorderProvider(undefined);
+ 		this.editor.composerFacts = component;
+ 	}
 diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
-index 556504646b..aa053bcc18 100644
+index 556504646b..76f99fa488 100644
 --- a/packages/tui/src/status-line/component.ts
 +++ b/packages/tui/src/status-line/component.ts
 @@ -566,6 +566,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
@@ -299,7 +327,7 @@ index 556504646b..aa053bcc18 100644
  	setRunningSubagents(agentIds: readonly string[]): void {
  		if (
  			agentIds.length === this.#runningSubagentIds.size &&
-@@ -2927,6 +2939,27 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2927,6 +2939,28 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			}
  		}
  
@@ -308,20 +336,21 @@ index 556504646b..aa053bcc18 100644
 +		if (plain && this.#footerColumnWidths.length > 0) {
 +			let remaining = Math.max(0, topFillWidth - totalWidth());
 +			let column = 0;
-+			for (const group of [left, right]) {
++			for (const [group, widths] of [
++				[left, leftWidths],
++				[right, rightWidths],
++			] as const) {
 +				for (let index = 0; index < group.length; index++, column++) {
-+					const extra = Math.min(
-+						remaining,
-+						Math.max(0, (this.#footerColumnWidths[column] ?? 0) - visibleWidth(group[index])),
-+					);
++					const extra = Math.min(remaining, Math.max(0, (this.#footerColumnWidths[column] ?? 0) - widths[index]));
 +					if (extra > 0) {
 +						group[index] += padding(extra);
++						widths[index] += extra;
 +						remaining -= extra;
 +					}
 +				}
 +			}
-+			leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
-+			rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
++			leftWidth = groupWidth(leftWidths, leftCapWidth + bandCapWidth, leftSepWidth);
++			rightWidth = groupWidth(rightWidths, rightCapWidth, rightSepWidth);
 +		}
 +
  		const renderGroup = (parts: string[], direction: "left" | "right"): string => {

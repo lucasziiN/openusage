@@ -93,6 +93,12 @@ echo "==> Running patch tests"
 (cd "$worktree/packages/coding-agent" &&
   bun test test/modes/controllers/extension-ui-controller.test.ts test/status-line-segment-padding.test.ts)
 
+# Tests only cover the patched files; upstream API changes elsewhere (such as a
+# callee's new signature) surface only in the type checker.
+echo "==> Type checking"
+(cd "$worktree/packages/tui" && bun run check:types)
+(cd "$worktree/packages/coding-agent" && bun run check:types)
+
 echo "==> Compiling"
 rm -f "$worktree/packages/coding-agent/dist/omp.exe"
 (cd "$worktree/packages/coding-agent" && bun run build)
