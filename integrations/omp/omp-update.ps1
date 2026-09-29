@@ -16,8 +16,13 @@ function omp-update {
     $rebuildScript = (Join-Path $PSScriptRoot 'rebuild-omp-patched.sh') -replace '\\', '/'
 
     omp update @args
+    # `omp update` can exit non-zero after a successful install (18.3.x reports
+    # "the event loop drained while it was still pending"), so the exit code
+    # alone cannot tell whether the binary changed. Check the binary instead.
     if ($LASTEXITCODE -ne 0) {
-        Write-Error 'omp update failed; the installed OMP was left as it was.'
+        Write-Warning "omp update exited with code $LASTEXITCODE; checking the installed binary anyway."
+    }
+    if ($args -contains '--check' -or $args -contains '-c') {
         return
     }
 
